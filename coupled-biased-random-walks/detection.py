@@ -10,7 +10,7 @@ from six.moves import range, zip
 from count import ObservationCounter, get_feature_name, get_mode
 
 
-class CBRW(object):
+class BaseBiasedRandomWalker(object):
 
     PRESET_RW_PARAMS = {
         'alpha':    0.95,
@@ -21,55 +21,14 @@ class CBRW(object):
     def __init__(self, rw_params=None):
         self.rw_params = rw_params if rw_params else self.PRESET_RW_PARAMS
         self._counter = ObservationCounter()
-        self._stationary_prob = None
-        self._feature_relevance = None
 
-    def add_observations(self, observation_iterable):
-        self._counter.update(observation_iterable)
-
-    def fit(self):
-        if self._counter.n_obs == 0:
-            raise ValueError('no observations provided')
+    def _compute_probabilities(self):
         bias_dict = self._compute_biases()
         transition_matrix = self._compute_biased_transition_matrix(bias_dict)
-        self._fit(transition_matrix)
-        return self
-
-    def score(self, observation_iterable):
-        if isinstance(observation_iterable, dict):
-            observation_iterable = [observation_iterable]
-        return np.array([self._score(obs) for obs in observation_iterable])
-
-    def _fit(self, transition_matrix):
-        pi = self._random_walk(transition_matrix, self.rw_params)
-        pi = pi.ravel()
-        stationary_prob = {}
-        feature_relevance = defaultdict(int)
-        for feature_val, idx in iteritems(self._counter.index):
-            prob = pi[idx]
-            stationary_prob[feature_val] = prob
-            feature_relevance[get_feature_name(feature_val)] += prob
-        self._stationary_prob = stationary_prob
-        # feature relevance scores are to be used as weights; accordingly the paper
-        # normalizes them to sum to 1, however this sum normalization should not be
-        # necessary since su(pi) = 1 by definition
-        self._feature_relevance = dict(feature_relevance)
-
-    def _score(self, observation):
-        return sum(self._get_feature_relevance(item) * self._get_node_score(item)
-                   for item in iteritems(observation))
-
-    def _get_node_score(self, node_name):
-        try:
-            return self._stationary_prob[node_name]
-        except KeyError:
-            raise ValueError('unknown feature value: {}'.format(node_name))
-
-    def _get_feature_relevance(self, feature_tuple):
-        feature_name = get_feature_name(feature_tuple)
-        return self._feature_relevance.get(feature_name, 0)
+        return self._random_walk(transition_matrix, self.rw_params)
 
     def _compute_biased_transition_matrix(self, bias_dict):
+
         idx = []
         prob = []
         for (symbol1, symbol2), joint_count in iteritems(self._counter.joint_counts):
@@ -146,3 +105,53 @@ class CBRW(object):
         # divide data by (broadcasted) row sums
         normalized = matrix.data / row_sums[row_idx]
         return csr_matrix((normalized, (row_idx, col_idx)), shape=matrix.shape)
+
+
+class CBRWScorer(BaseBiasedRandomWalker):
+
+    def __init__(self, rw_params=None):
+        self._stationary_prob = None
+        self._feature_relevance = None
+        super(CBRWScorer, self).__init__(rw_params)
+
+    def add_observations(self, observation_iterable):
+        self._counter.update(observation_iterable)
+
+    def fit(self):
+        if self._counter.n_obs == 0:
+            raise ValueError('no observations provided')
+
+        stationary_prob = {}
+        feature_relevance = defaultdict(int)
+
+        pi = self._compute_probabilities().ravel()
+
+        for feature_val, idx in iteritems(self._counter.index):
+            prob = pi[idx]
+            stationary_prob[feature_val] = prob
+            feature_relevance[get_feature_name(feature_val)] += prob
+        self._stationary_prob = stationary_prob
+        # feature relevance scores are to be used as weights; accordingly the paper
+        # normalizes them to sum to 1, however this sum normalization should not be
+        # necessary since su(pi) = 1 by definition
+        self._feature_relevance = dict(feature_relevance)
+        return self
+
+    def score(self, observation_iterable):
+        if isinstance(observation_iterable, dict):
+            observation_iterable = [observation_iterable]
+        return np.array([self._score(obs) for obs in observation_iterable])
+
+    def _score(self, observation):
+        return sum(self._get_feature_relevance(item) * self._get_node_score(item)
+                   for item in iteritems(observation))
+
+    def _get_node_score(self, node_name):
+        try:
+            return self._stationary_prob[node_name]
+        except KeyError:
+            raise ValueError('unknown feature value: {}'.format(node_name))
+
+    def _get_feature_relevance(self, feature_tuple):
+        feature_name = get_feature_name(feature_tuple)
+        return self._feature_relevance.get(feature_name, 0)
